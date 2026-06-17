@@ -1,0 +1,39 @@
+La capa de ``juego propiamente dicho'' es, a nivel código, prácticamente idéntica al TP x86, porque ya era agnóstica a
+la ISA (punteros a estructuras, enteros, dibujos de pantalla). Los archivos \texttt{riscv/game.cpp} y
+\texttt{riscv/sched.cpp} conservan la lógica de \texttt{game\_move}, \texttt{game\_take}, \texttt{game\_get\_id},
+\texttt{sched\_spawn} y \texttt{sched\_kill}.
+
+Las dos diferencias relevantes respecto al informe x86:
+
+\begin{itemize}
+  \item \textbf{\texttt{game\_move}} ya no hace \texttt{copy\_page} ni \texttt{mmu\_mapPage} manuales: todo eso está
+  encapsulado en \texttt{mmu\_task\_move} (sección~\ref{sec:sv39}). El cuerpo queda enfocado exclusivamente en la lógica
+  del juego (cálculo del delta, wrap vertical, espejado para el jugador B, chequeo de base, puntaje, redibujo).
+
+  \item \textbf{\texttt{sched\_spawn}} no registra ningún descriptor de TSS en la GDT (no hay). El \emph{caller} en
+  \texttt{kernel.cpp::spawn\_miner} se ocupa de:
+  \begin{enumerate}
+    \item reservar el slot y marcarlo como vivo (responsabilidad de \texttt{sched\_spawn});
+    \item resetear el \texttt{TrapFrame} del slot (\texttt{init\_task\_if\_needed}); y
+    \item llamar a \texttt{mmu\_task\_init(slot, player, x, y)}, que construye (o actualiza) la page-table y vuelca el
+    binario del minero en la celda de spawn.
+  \end{enumerate}
+\end{itemize}
+
+\begin{codesnippet}
+\begin{verbatim}
+ static void spawn_miner(uint32_t player_id) {
+     int32_t slot = sched_spawn(player_id);
+     if (slot < 0) return;
+     const uint32_t u = (uint32_t)slot;
+     g_tasks[u].initialized = 0;
+     init_task_if_needed(u);
+     const uint32_t x = sched_miners_state[u].pos_x;
+     const uint32_t y = sched_miners_state[u].pos_y;
+     mmu_task_init(u, player_id, x, y);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El \emph{cooldown} de spawn (\texttt{g\_spawn\_cooldown\_a/b}, 6 ticks) es un detalle UX agregado al port (evita
+spawnear 20 mineros apretando una tecla sostenida); no tiene contraparte en el TP3 original.

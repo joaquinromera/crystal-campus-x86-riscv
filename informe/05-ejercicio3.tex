@@ -1,0 +1,137 @@
+\subsection{Reloj: PIT + PIC $\to$ MTIP + SSIP}
+\label{sec:reloj}
+
+\subsubsection*{Qué hacía el TP x86}
+
+La \texttt{\_isr32} llamaba a \texttt{nextClock} (animación del cursor) y \texttt{pic\_finish1} (EOI al PIC maestro), y
+ejecutaba \texttt{iret}.
+
+\subsubsection*{Equivalente en RISC-V}
+
+En RISC-V el timer está en CLINT/ACLINT~\cite{riscv-aclint}: dos MMIOs, \texttt{mtime} (contador libre) y
+\texttt{mtimecmp} (comparador por HART). Cuando \texttt{mtime} $\geq$ \texttt{mtimecmp}, se levanta \textbf{MTIP}
+(machine timer interrupt pending). El problema es que MTIP \textbf{solo} se puede atender en M-mode (no se puede delegar
+a S-mode directamente~\cite{riscv-priv}). Un sistema con OpenSBI resolvería esto usando
+\texttt{sbi\_set\_timer}~\cite{riscv-sbi}; con \texttt{-bios none} no hay SBI y debemos resolverlo nosotros.
+
+El patrón estándar (el mismo que usa xv6 en su build sin SBI~\cite{xv6-riscv} y que documenta el wiki OSDev para
+RISC-V~\cite{osdev-riscv}) es:
+
+\begin{enumerate}
+  \item Atender el MTIP en M-mode (\texttt{machine\_trap\_entry}, \texttt{mcause}$=$7).
+  \item Reprogramar el próximo \texttt{mtimecmp}.
+  \item \textbf{Levantar un supervisor software interrupt (SSIP)} escribiendo \texttt{sip.SSIP}$=$1 desde M-mode.
+  \item Ejecutar \texttt{mret} y dejar que la CPU dispare el handler S-mode (vía \texttt{stvec}) con \texttt{scause}$=$1
+  (SSIP).
+\end{enumerate}
+
+En \texttt{machine.S}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ # Reprogramar mtimecmp
+ csrr t0, time
+ la t1, g_timer_delta_ticks
+ ld t1, 0(t1)
+ add t0, t0, t1
+ csrr t1, mhartid
+ slli t1, t1, 3
+ li t2, MTIMECMP_BASE        # 0x0200_4000 + 8*hartid
+ add t2, t2, t1
+ sd t0, 0(t2)
+
+ # Levantar SSIP
+ li t0, 2
+ csrs sip, t0
+\end{verbatim}
+\end{codesnippet}
+
+Y del lado de S-mode, \texttt{trap\_handle} reconoce SSIP como el tick:
+
+\begin{codesnippet}
+\begin{verbatim}
+ if (is_interrupt) {
+     if (cause_code == 1) {  // SSIP
+         const uint64_t ssip_mask = (1ull << 1);
+         asm volatile("csrc sip, %0" : : "r"(ssip_mask));
+         /* cooldowns + poll UART + spinner + scheduler */
+         return schedule_next();
+     }
+     return tf;
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El \texttt{csrc sip, SSIP} es el análogo de \texttt{pic\_finish1}: limpia el bit pendiente para que el interrupt no se
+vuelva a disparar. La función \texttt{nextClock} del TP original (animación del spinner en la esquina) se preserva con
+\texttt{update\_spinner()} en \texttt{kernel.cpp}.
+
+\subsection{Teclado: IRQ1 + scancodes $\to$ UART polling}
+
+\subsubsection*{Qué hacía el TP x86}
+
+La \texttt{\_isr33} leía el scancode de \texttt{in al, 0x60}, pusheaba \texttt{eax} y llamaba a
+\texttt{idt\_int\_teclado} (que traducía el scancode a la acción del juego), luego \texttt{pic\_finish1} y
+\texttt{iret}.
+
+\subsubsection*{Equivalente en RISC-V}
+
+QEMU \texttt{virt} no tiene teclado PS/2 estándar; lo que hay es el UART 16550 sobre \texttt{-serial stdio}. Podría
+tomarse la interrupción del UART vía PLIC, pero para no sumar un mecanismo más al informe terminé haciéndolo por
+\textbf{polling en cada tick}, que a la frecuencia del reloj ($\sim$20~Hz) se percibe igual. En lugar de un ISR por
+tecla, \texttt{trap\_handle} llama a \texttt{poll\_uart\_input()} al atender el tick, y ese drena el buffer con
+\texttt{uart::getc\_nonblock()}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ int uart::getc_nonblock() {
+     if ((mmio_read8(UART_LSR) & LSR_DATA_READY) == 0)
+         return -1;
+     return mmio_read8(UART_RHR);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Al llegar un byte se lo pasa a \texttt{handle\_key}, que mapea teclas (no scancodes) a acciones de juego:
+
+\begin{itemize}
+  \item Jugador ROJO: \texttt{W} (arriba), \texttt{S} (abajo), \texttt{Q}/\texttt{E} (spawnear minero).
+  \item Jugador AZUL: \texttt{I} (arriba), \texttt{K} (abajo), \texttt{O}/\texttt{P} (spawnear minero).
+\end{itemize}
+
+El byte recibido se imprime en la esquina superior derecha en hex (equivalente al ``mostrar la tecla 0..9 en pantalla''
+del TP x86), útil para validar input.
+
+\subsection{\texttt{int 47} (x86) $\to$ \texttt{ecall} (RISC-V)}
+
+En x86 se declaraba una Interrupt Gate con DPL=3 en la entrada 47 de la IDT, y la \texttt{\_isr47} inicialmente seteaba
+\texttt{eax}$=$\texttt{0x42} y hacía \texttt{iret}. En RISC-V el análogo de esa \emph{software interrupt} es
+\texttt{ecall}: desde U-mode genera un trap con \texttt{scause}$=$8 (``Environment call from U-mode''). No hay un
+``número'' configurable como en \texttt{int N}; lo que sí se mantiene del TP3 son los IDs de servicio, que en este port
+van por \texttt{a7} siguiendo la convención estándar de syscalls de RISC-V:
+
+\begin{center}
+\begin{tabular}{l|l}
+\textbf{Servicio} & \textbf{ABI} \\
+\hline
+\texttt{move(d)} & \texttt{a7}=177788, \texttt{a0}=\texttt{d} \\
+\texttt{take()}  & \texttt{a7}=310311, retorna en \texttt{a0} \\
+\texttt{getId()} & \texttt{a7}=760279, retorna en \texttt{a0} \\
+\end{tabular}
+\end{center}
+
+No se usa un ``eax transitorio con \texttt{0x42}'' porque el handler puede escribir directamente sobre \texttt{tf->a0} y
+el \texttt{sret} restaura \texttt{a0} como valor de retorno. El stub de usuario vive en \texttt{riscv/syscall.h}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static inline int32_t syscall_take() {
+     register uint64_t a7 asm("a7") = 310311;
+     register uint64_t a0 asm("a0");
+     asm volatile("ecall" : "=r"(a0) : "r"(a7) : "memory");
+     return (int32_t)a0;
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El despacho en \texttt{trap\_handle} se describe en el ejercicio~7.

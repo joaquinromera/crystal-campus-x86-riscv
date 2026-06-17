@@ -1,0 +1,82 @@
+\subsection{Qué hacía el TP x86}
+
+\texttt{mmu\_initKernelDir} armaba un Page Directory en \texttt{0x27000} y una PT en \texttt{0x28000}, con identity
+mapping de los primeros 4~MiB. Luego \texttt{kernel.asm} cargaba CR3 con \texttt{KERNEL\_PAGE\_DIR} y seteaba
+\texttt{CR0.PG}$=$1.
+
+\subsection{Equivalente en RISC-V: Sv39}
+\label{sec:sv39}
+
+Sv39 es el esquema de paginación de 3 niveles más común en rv64:
+
+\begin{itemize}
+  \item Direcciones virtuales de 39 bits (los superiores deben ser sign-extended).
+  \item Tres niveles de page table con 512 entradas de 8 bytes cada una (4~KiB por tabla). VPN2 (bits 38:30), VPN1 (bits
+  29:21), VPN0 (bits 20:12).
+  \item Páginas de 4~KiB, 2~MiB (\emph{megapage}, leaf en L1) o 1~GiB (\emph{gigapage}, leaf en L2).
+  \item PTE de 64 bits con los bits \texttt{V} (1), \texttt{R} (2), \texttt{W} (4), \texttt{X} (8), \texttt{U} (16),
+  \texttt{G} (32), \texttt{A} (64), \texttt{D} (128), seguidos de la PPN.
+\end{itemize}
+
+El equivalente conjunto de ``\texttt{mov cr3, eax} + \texttt{or CR0, PG}'' es escribir el CSR \texttt{satp} con formato:
+\[
+\texttt{satp} = (\underbrace{\texttt{MODE}}_{\text{SV39}=8} \ll 60) \;|\; (\texttt{ASID} \ll 44) \;|\;
+\texttt{PPN}(\text{root})
+\]
+seguido de un \texttt{sfence.vma} para invalidar caches de traducción. En \texttt{mmu.cpp}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static inline uint64_t make_satp(uint64_t root_pa, uint16_t asid) {
+     const uint64_t ppn = root_pa >> 12;
+     return (SATP_MODE_SV39 << 60)
+          | (static_cast<uint64_t>(asid) << 44)
+          | (ppn & 0x0FFF'FFFF'FFFFull);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{Identity mapping del kernel}
+
+Dado que en RISC-V rv64 el espacio virtual es holgado, en lugar de armar una PT nivel-0 que mapee los primeros 4~MiB
+como en el TP x86, se usa una única \textbf{leaf de 1~GiB en L2} para cubrir todo el rango de RAM relevante
+(\texttt{0x8000\_0000}..\texttt{0xBFFF\_FFFF}), con flags \texttt{V|R|W|X|A|D} (supervisor only, sin \texttt{U}):
+
+\begin{codesnippet}
+\begin{verbatim}
+ static inline void map_kernel_gigapage(uint64_t* root) {
+     const uint64_t va = 0x8000'0000ull;
+     const uint64_t pa = 0x8000'0000ull;
+     const uint64_t flags = PTE_V|PTE_R|PTE_W|PTE_X|PTE_A|PTE_D;
+     root[vpn2(va)] = pte_make_leaf(pa, flags);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Esto reemplaza la tabla \texttt{KERNEL\_PAGE\_TABLE\_0} del TP x86. Los bits \texttt{A} y \texttt{D} son requeridos por
+el hardware en el momento del primer acceso; setearlos \emph{a priori} simplifica la implementación y está
+explícitamente permitido por la especificación~\cite{riscv-priv}.
+
+\subsection{UART como ``MMIO del video''}
+
+El MMIO del UART 16550 se mapea como una \textbf{megapage} (2~MiB) en L1 con flags \texttt{V|R|W|A|D} (sin \texttt{X} ni
+\texttt{U}). Este bloque cumple el rol que en x86 cumplía el ``segmento de pantalla''. El mapeo está presente tanto en
+la page-table del kernel como en la de cada tarea (aunque las tareas no tienen \texttt{U} en esa entrada, por lo que no
+pueden tocar el UART desde modo usuario).
+
+\subsection{Activación de paginación y PMP}
+
+Antes del \texttt{satp}, PMP tiene que autorizar el acceso a memoria en S-mode. Eso ya lo hizo \texttt{machine\_init} en
+M-mode (sección~\ref{sec:machine}). Por lo tanto, la ``activación de paginación'' del TP3 se reduce a una sola línea en
+\texttt{mmu\_init}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ void mmu_init() {
+     if (!g_idle.initialized) { /* ... construye g_idle ... */ }
+     mmu_switch_to_idle();   // csrw satp + sfence.vma
+ }
+\end{verbatim}
+\end{codesnippet}
+
+A partir de esa llamada, todas las direcciones en S-mode son traducidas por Sv39.

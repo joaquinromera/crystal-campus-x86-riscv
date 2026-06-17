@@ -1,0 +1,86 @@
+\subsection{Qué hacía el TP x86}
+
+Se armaba una IDT de 256 entradas. Para cada excepción (0..18) se daba de alta una \texttt{IDT\_ENTRY} con el selector
+de código de kernel, DPL=0, Present=1, Type=1110 (Interrupt Gate). Cada ISR (\_is0, \_is1, \ldots) se generaba con una
+macro en \texttt{isr.asm} e imprimía un mensaje. Se cargaba la IDT con \texttt{lidt}.
+
+\subsection{Equivalente en RISC-V}
+
+RISC-V no tiene una tabla indexada de gates: hay un único CSR, \texttt{stvec}, que apunta a la dirección a la que salta
+el procesador siempre que una excepción o interrupción tiene que atenderse en S-mode. El motivo lo decide el handler en
+software leyendo \texttt{scause}. Con lo cual:
+
+\begin{itemize}
+  \item La IDT se reemplaza por una \textbf{rutina única en ASM} (\texttt{trap\_entry}, en \texttt{riscv/trap.S}) que
+  guarda todo el contexto y llama a un despachador en C++ (\texttt{trap\_handle}, en \texttt{riscv/kernel.cpp}).
+  \item ``Selector + offset + DPL'' ya no tiene sentido: \texttt{stvec} es una dirección, y el privilegio al que vuelve
+  el handler sale de \texttt{sstatus.SPP}.
+  \item El ``cargar IDT con \texttt{lidt}'' queda en:
+\begin{codesnippet}
+\begin{verbatim}
+ asm volatile("csrw stvec, %0" : : "r"(trap_entry));
+\end{verbatim}
+\end{codesnippet}
+  en \texttt{kernel\_main}, con \texttt{stvec} en modo ``Direct'' (MODE=0). El modo ``Vectored'' (MODE=1) permitiría un
+  salto por causa de interrupción; no se usa aquí.
+\end{itemize}
+
+\subsection{Guardado de contexto: \texttt{TrapFrame} y \texttt{trap.S}}
+
+El equivalente de ``\texttt{pushad} + selectores'' es la estructura \texttt{TrapFrame} (\texttt{riscv/trap.h}):
+
+\begin{codesnippet}
+\begin{verbatim}
+ struct TrapFrame {
+   uint64_t ra, sp, gp, tp;
+   uint64_t t0, t1, t2;
+   uint64_t s0, s1;
+   uint64_t a0, a1, a2, a3, a4, a5, a6, a7;
+   uint64_t s2, ..., s11;
+   uint64_t t3, t4, t5, t6;
+   uint64_t sepc, sstatus, scause, stval;
+ };
+\end{verbatim}
+\end{codesnippet}
+
+\texttt{trap\_entry} (en \texttt{riscv/trap.S}) hace, a grandes rasgos:
+
+\begin{enumerate}
+  \item Cambia a una stack de trap dedicada (\texttt{trap\_stack\_top}). Esto es necesario porque, al entrar desde
+  U-mode, \texttt{sp} apunta al stack del usuario, y usarlo implicaría ejecutar código de kernel en una página de
+  usuario.
+  \item Guarda todos los GPRs (excepto \texttt{x0}) en el \texttt{TrapFrame} apuntado por
+  \texttt{g\_current\_trapframe}.
+  \item \textbf{Recarga \texttt{gp} al del kernel} con \texttt{.option norelax}. Esta parte es crítica: los binarios de
+  usuario se linkean en \texttt{0x08000000} y tienen su propio \texttt{\_\_global\_pointer\$} $\sim$\texttt{0x08000800},
+  por lo que los accesos gp-relativos del kernel (pensados con el gp del kernel, $\sim$\texttt{0x8000....}) faltarían si
+  el trap handler mantuviera el gp del usuario.
+  \item Guarda \texttt{sepc}, \texttt{sstatus}, \texttt{scause}, \texttt{stval}.
+  \item Llama a \texttt{trap\_handle(tf)}, que devuelve un nuevo \texttt{TrapFrame*} (la ``próxima tarea'' a correr).
+  \item Restaura el contexto del \texttt{TrapFrame} retornado (incluyendo \texttt{sepc}/\texttt{sstatus}) y ejecuta
+  \texttt{sret}.
+\end{enumerate}
+
+La rutina \texttt{enter\_user}, también en \texttt{trap.S}, se utiliza para el salto inicial desde \texttt{kernel\_main}
+a la primera tarea U-mode: setea \texttt{g\_current\_trapframe}, carga directamente todos los registros desde el
+\texttt{TrapFrame} y ejecuta \texttt{sret}. Es el análogo RISC-V del \texttt{jmp 0xB8:0} del TP x86 para saltar a la
+tarea idle.
+
+\subsection{Probar una excepción}
+
+El TP x86 probaba la IDT forzando una división por cero. En este port, el binario de usuario \texttt{riscv/user/miner.c}
+provoca deliberadamente una excepción cuando el minero tiene id 5:
+
+\begin{codesnippet}
+\begin{verbatim}
+ if (id == 5) {
+     syscall_move(Forward);  /* ... */
+     *(volatile uint32_t*)0x0 = 0xDEADBEEF;
+     for (;;) {}
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Escribir en la dirección virtual \texttt{0x0} desde U-mode genera un \emph{Store/AMO page fault} (\texttt{scause}$=$15)
+porque esa dirección no está mapeada. \texttt{trap\_handle} mata a la tarea mediante \texttt{sched\_kill()} y cede el
+quantum a idle (ver ejercicio~7).

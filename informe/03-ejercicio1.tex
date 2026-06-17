@@ -1,0 +1,125 @@
+\subsection{Qué hacía el TP x86}
+
+El TP3 original arrancaba en modo real desde el boot-sector, habilitaba A20, cargaba la GDT con \texttt{lgdt}, prendía PE de CR0,
+hacía el \texttt{jmp} lejano a modo protegido, cargaba los segmentos y fijaba el stack en \texttt{0x27000}. Además declaraba
+un segmento de pantalla aparte y limpiaba la VGA.
+
+\subsection{Equivalente en RISC-V}
+
+En RISC-V no hay segmentación ni A20. Los permisos de memoria salen de la PTE Sv39 (\texttt{V}, \texttt{R}, \texttt{W},
+\texttt{X}, \texttt{U}, \texttt{G}, \texttt{A}, \texttt{D}), y lo más parecido a ``pasar a modo protegido'' es
+\textbf{ejecutar \texttt{mret} desde M-mode con \texttt{mstatus.MPP}$=$1 (S-mode) y
+\texttt{mepc}$=$\texttt{kernel\_main}}.
+
+La cadena de arranque es:
+
+\begin{enumerate}
+  \item QEMU salta a \texttt{\_start} en \texttt{0x80000000} (M-mode).
+  \item \texttt{entry.S} inicializa \texttt{gp}, stack del kernel y limpia \texttt{.bss}, y llama a
+  \texttt{machine\_init}.
+  \item \texttt{machine.S::machine\_init} (una ``mini firmware'' en M-mode, ver sección~\ref{sec:machine}) configura
+  PMP, delega traps a S-mode, programa el tick y ejecuta \texttt{mret} $\to$ \texttt{kernel\_main} ya en S-mode.
+\end{enumerate}
+
+\subsection{\texttt{riscv/entry.S}}
+
+Fragmento relevante del entrypoint:
+
+\begin{codesnippet}
+\begin{verbatim}
+ _start:
+     .option push
+     .option norelax
+     la gp, __global_pointer$
+     .option pop
+
+     csrw mie, zero
+     csrci mstatus, 0x8        /* MIE */
+     csrw sie, zero
+     csrci sstatus, 0x2        /* SIE */
+
+     la sp, kernel_stack_top
+
+     /* Clear .bss */
+     la t0, __bss_start
+     la t1, __bss_end
+ 1:
+     bgeu t0, t1, 2f
+     sb zero, 0(t0)
+     addi t0, t0, 1
+     j 1b
+ 2:
+     call machine_init
+\end{verbatim}
+\end{codesnippet}
+
+Detalles técnicos:
+
+\begin{itemize}
+  \item \textbf{\texttt{gp} y \texttt{.option norelax}.} La psABI reserva \texttt{gp} para accesos \emph{small-data}
+  gp-relativos~\cite{riscv-psabi}. Si no se desactiva la \emph{linker relaxation} alrededor de \texttt{la gp,
+  \_\_global\_pointer\$}, el linker ve un \texttt{auipc}/\texttt{addi} y lo reescribe como un \texttt{addi gp, gp, 0}
+  gp-relativo --- básicamente, asume que \texttt{gp} ya vale lo que tiene que valer. Resultado: \texttt{gp} queda en
+  basura y cualquier acceso small-data posterior lee cualquier cosa. \texttt{.option norelax} apaga esa optimización en
+  ese bloque puntual.
+
+  \item \textbf{Stack del kernel.} Es el equivalente a ``setear el stack en \texttt{0x27000}'' del TP x86. El símbolo
+  \texttt{kernel\_stack\_top} está definido al final de un bloque en \texttt{.bss} de 8~KiB, resultado del linker (ver
+  \texttt{riscv/linker.ld}). No hace falta una dirección mágica porque el linker coloca todo a partir de
+  \texttt{0x80000000} y la ubicación concreta de el stack la decide el linker al resolver símbolos.
+\end{itemize}
+
+\subsection{\texttt{riscv/machine.S}: mini firmware en M-mode}
+\label{sec:machine}
+
+\texttt{machine\_init} cumple el rol que en un sistema típico cumple OpenSBI (la firmware SBI de referencia en
+RISC-V~\cite{riscv-sbi}). Como se corre con \texttt{-bios none}, no hay SBI, y el kernel tiene que proveer él mismo la
+configuración mínima de M-mode. El esqueleto sigue la receta \emph{Bare Bones} para RISC-V documentada en
+OSDev~\cite{osdev-riscv}. Los pasos:
+
+\begin{enumerate}
+  \item \textbf{Stack y trap vector de M-mode.} \texttt{mscratch} guarda el tope de el stack de M-mode y \texttt{mtvec}
+  apunta a \texttt{machine\_trap\_entry}.
+  \item \textbf{Delegación.} \texttt{mideleg} delega a S-mode los interrupts de supervisor (SSIP, STIP, SEIP) y
+  \texttt{medeleg} delega las excepciones estándar 0..15. Así, las excepciones desde U-mode saltan directamente a
+  \texttt{stvec} del kernel y no a \texttt{mtvec}.
+  \item \textbf{PMP.} Una sola región TOR que abarca todo el espacio (\texttt{pmpaddr0 = -1}, \texttt{pmpcfg0 =
+  RWX+TOR}) le da a S-mode y U-mode acceso pleno según PMP. El control fino después lo dan las PTEs Sv39.
+  \item \textbf{Timer.} Se habilita MTIE en \texttt{mie} y se programa el primer \texttt{mtimecmp} = \texttt{time} +
+  \texttt{g\_timer\_delta\_ticks}.
+  \item \textbf{Salto a S-mode.} Se setea \texttt{mstatus.MPP}$=$1 (S), \texttt{mstatus.MPIE}$=$1,
+  \texttt{mepc}$=$\texttt{kernel\_main} y se ejecuta \texttt{mret}. Esto es el análogo RISC-V del \texttt{jmp
+  0xA0:modo\_protegido} del TP x86.
+\end{enumerate}
+
+\begin{codesnippet}
+\begin{verbatim}
+ # Delegar interrupts a S-mode: SSIP, STIP, SEIP
+ li t0, ((1 << 1) | (1 << 5) | (1 << 9))
+ csrw mideleg, t0
+
+ # Delegar excepciones 0..15 a S-mode
+ li t0, 0xFFFF
+ csrw medeleg, t0
+
+ # PMP: R|W|X + TOR cubriendo 0..max
+ li t0, -1
+ csrw pmpaddr0, t0
+ li t0, 0x0F
+ csrw pmpcfg0, t0
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{``Segmento de pantalla'' y limpieza inicial}
+
+Como no hay segmentación, la pantalla se resuelve por \textbf{mapeo de MMIO}: el UART 16550 de QEMU \texttt{virt} en
+\texttt{0x1000\_0000}. En cada page-table de tarea (y en la de idle) se mapea ese rango con una megapage (2~MiB) a nivel
+L1, con flags \texttt{V|R|W|A|D}, sin \texttt{U}, para que el kernel pueda escribirlo. El equivalente al ``segmento de
+pantalla sólo accesible por el kernel'' del TP x86 es entonces el bit \texttt{U}$=$0 de esa entrada.
+
+La limpieza y pintado del tablero equivalen, a nivel código, a \texttt{screen\_draw} / \texttt{screen\_drawBox} en
+\texttt{riscv/screen.cpp}. Internamente la pantalla se emula como un buffer \texttt{g\_video[50][80]} de celdas
+(caracter + atributo estilo VGA), que se vuelca al UART mediante secuencias ANSI (\texttt{\textbackslash x1b[?1049h}
+para el alternate screen, \texttt{\textbackslash x1b[y;xH} para posicionar el cursor, \texttt{\textbackslash x1b[fg;bgm}
+para atributos, etc.). Al imprimir, un atributo estilo \texttt{C\_BG\_RED | C\_FG\_WHITE} se traduce a los códigos ANSI
+\texttt{41} y \texttt{97}.

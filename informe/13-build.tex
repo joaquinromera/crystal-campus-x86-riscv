@@ -1,0 +1,44 @@
+\subsection{Dependencias}
+
+\begin{itemize}
+  \item \texttt{make}.
+  \item Toolchain bare-metal: \texttt{riscv64-unknown-elf-\{gcc, g++, as, ld, objcopy\}}.
+  \item \texttt{qemu-system-riscv64}.
+\end{itemize}
+
+\subsection{Compilación}
+
+\begin{codesnippet}
+\begin{verbatim}
+ make -C riscv clean all
+\end{verbatim}
+\end{codesnippet}
+
+Genera \texttt{riscv/build/kernel.elf} (y \texttt{.bin}), que contiene embebidos los binarios de usuario
+(\texttt{build/user\_miner.bin}, \texttt{build/user\_idle.bin}).
+
+\subsection{Ejecución}
+
+\begin{codesnippet}
+\begin{verbatim}
+ make -C riscv run
+\end{verbatim}
+\end{codesnippet}
+
+que se expande a:
+
+\begin{codesnippet}
+\begin{verbatim}
+ qemu-system-riscv64 -machine virt -nographic -monitor none \
+     -serial stdio -bios none -kernel riscv/build/kernel.elf
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{Controles}
+
+\begin{itemize}
+  \item Jugador ROJO: \texttt{W} (arriba), \texttt{S} (abajo), \texttt{Q} o \texttt{E} (spawnear minero).
+  \item Jugador AZUL: \texttt{I} (arriba), \texttt{K} (abajo), \texttt{O} o \texttt{P} (spawnear minero).
+\end{itemize}
+
+En la esquina superior derecha se muestra, en hex, el último byte recibido por el UART (útil para validar input).

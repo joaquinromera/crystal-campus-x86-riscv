@@ -1,0 +1,161 @@
+\subsection{Estructuras del scheduler}
+
+Las estructuras en \texttt{riscv/state.h} son un calco directo del TP3:
+
+\begin{codesnippet}
+\begin{verbatim}
+ sched_miner_state_t sched_miners_state[20];
+ uint32_t sched_player_row[2];
+ uint32_t sched_miners_left[2];
+ uint8_t  sched_last_miner[2];
+ uint8_t  sched_this_miner;
+\end{verbatim}
+\end{codesnippet}
+
+La inicialización (\texttt{sched\_init}) hace exactamente lo mismo que la versión x86: marca los 20 slots como muertos,
+reinicia contadores y filas. La única diferencia relevante es que, en este port, no hay una ``GDT de TSS'' que resetear:
+los slots son simples índices.
+
+\subsection{\texttt{sched\_nextTask}}
+
+El algoritmo del TP3 (alternar entre jugadores y, si el opuesto no tiene mineros vivos, usar uno del jugador actual; si
+ninguno hay, usar idle) se preserva:
+
+\begin{codesnippet}
+\begin{verbatim}
+ int32_t sched_nextTask() {
+     uint32_t actual   = (sched_this_miner < 10) ? PLAYER_A : PLAYER_B;
+     uint32_t opuesto  = (actual == PLAYER_A) ? PLAYER_B : PLAYER_A;
+     uint16_t ix = 0;
+
+     if (aux_get_next_alive_miner(opuesto, &ix)) {
+         sched_this_miner = ix;
+         sched_last_miner[opuesto] = ix % 10;
+         return ix;
+     }
+     if (aux_get_next_alive_miner(actual, &ix)) {
+         sched_this_miner = ix;
+         sched_last_miner[actual] = ix % 10;
+         return ix;
+     }
+     return -1;  // idle
+ }
+\end{verbatim}
+\end{codesnippet}
+
+La diferencia clave con el informe x86 es el \emph{tipo de retorno}: ya no es un selector de GDT, sino el índice 0..19
+del minero (o $-1$ para idle). Quien consume ese índice es \texttt{schedule\_next} en \texttt{kernel.cpp}, que convierte
+el slot a \texttt{TrapFrame*} y hace \texttt{mmu\_switch\_to\_task(slot)}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static TrapFrame* schedule_next() {
+     int32_t next = sched_nextTask();
+     if (next < 0) return yield_to_idle();
+     uint32_t slot = (uint32_t)next;
+     init_task_if_needed(slot);
+     mmu_switch_to_task(slot);
+     g_current_slot = next;
+     sched_this_miner = (uint8_t)next;
+     return &g_tasks[slot].tf;
+ }
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{Despacho de \texttt{ecall}}
+
+La ``rutina de int 47'' del TP3 se vuelve un \emph{branch} dentro de \texttt{trap\_handle} cuando \texttt{scause}$=$8:
+
+\begin{codesnippet}
+\begin{verbatim}
+ if (cause_code == 8) {            // ecall desde U-mode
+     tf->sepc += 4;                // saltar la propia ecall
+     poll_uart_input();
+     const uint64_t sys_id = tf->a7;
+
+     if (sys_id == 177788) {       // move(d=a0)
+         game_move((e_direction_t)tf->a0);
+         return yield_to_idle();   // equiv. del "jmp idle" del TP
+     }
+     if (sys_id == 310311) {       // take() -> a0
+         tf->a0 = (uint64_t)game_take();
+         return yield_to_idle();
+     }
+     if (sys_id == 760279) {       // getId() -> a0
+         tf->a0 = (uint64_t)game_get_id();
+         return tf;                // sin yield
+     }
+     if (g_current_slot >= 0) sched_kill();
+     return yield_to_idle();
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Detalles:
+
+\begin{itemize}
+  \item \texttt{sepc += 4}: a diferencia de \texttt{int N} en x86 (que pushea la dirección \emph{siguiente}), en RISC-V
+  \texttt{sepc} apunta a la \texttt{ecall} misma. Hay que avanzarlo manualmente al retornar~\cite{riscv-priv}.
+
+  \item \textbf{Yield a idle para \texttt{move}/\texttt{take}}. El TP3 requería que, tras un \texttt{move} o
+  \texttt{take}, la tarea Idle ejecutara el resto del quantum. En x86 eso se implementaba con un \texttt{jmp <idle>}
+  explícito. En este port se logra devolviendo \texttt{\&g\_idle\_tf} como próximo \texttt{TrapFrame}: \texttt{trap.S}
+  lo cargará y \texttt{sret} dejará a idle corriendo hasta el próximo SSIP.
+
+  \item \textbf{\texttt{getId} sin yield}. También fiel al TP3: retorna al mismo minero con \texttt{tf->a0} seteado.
+
+  \item \textbf{Syscall desconocido}. Se mata a la tarea (\texttt{sched\_kill}), tal como en el TP original.
+\end{itemize}
+
+\subsection{Intercambio de tareas por cada tick}
+
+El tick es un trap con \texttt{scause}$=$1 (ver sección~\ref{sec:reloj}). La lógica es:
+
+\begin{codesnippet}
+\begin{verbatim}
+ if (cause_code == 1) {
+     asm volatile("csrc sip, %0" : : "r"((uint64_t)(1ull<<1)));
+     if (g_spawn_cooldown_a) g_spawn_cooldown_a--;
+     if (g_spawn_cooldown_b) g_spawn_cooldown_b--;
+     poll_uart_input();
+     update_spinner();
+     return schedule_next();
+ }
+\end{verbatim}
+\end{codesnippet}
+
+\texttt{schedule\_next} elige la próxima tarea, \texttt{trap\_handle} retorna el \texttt{TrapFrame*} correspondiente y
+\texttt{trap.S} se encarga de restaurarlo y saltar. Todo el ``cambio de tarea'' del TP3 (que en x86 era un \texttt{jmp
+<sel>:<off>}) termina siendo una \texttt{sret} con un \texttt{TrapFrame} distinto. No es particularmente elegante, pero
+funciona.
+
+\subsection{Atención de excepciones y desalojo}
+
+Cualquier excepción distinta de \texttt{ecall} mata a la tarea actual (si había una corriendo) y cede a idle:
+
+\begin{codesnippet}
+\begin{verbatim}
+ // Any other exception: kill the current miner (if any) and keep going.
+ if (g_current_slot >= 0) {
+     print(kHeaderExcPrefix, kHeaderExcX, kHeaderY,
+           C_BG_BLACK | C_FG_LIGHT_RED);
+     print_hex((uint32_t)cause_code, 2,
+               kHeaderExcHexX, kHeaderY,
+               C_BG_BLACK | C_FG_LIGHT_RED);
+     sched_kill();
+ }
+ return yield_to_idle();
+\end{verbatim}
+\end{codesnippet}
+
+Esto cubre page faults (\texttt{scause} 12/13/15), illegal instructions (\texttt{scause}$=$2), misaligned loads/stores,
+etc. Por diseño, \texttt{scause} se imprime en hex en el banner superior: es el análogo reducido del ``modo debug'' del
+TP3.
+
+\subsection{Modo debug}
+
+El TP3 tenía un modo debug activable con la tecla \texttt{y} que mostraba el estado completo del procesador. En este
+port, la información se redujo a un indicador mínimo en la fila 0 del ``video'' (\texttt{TASK EXC XX}) con los dos
+dígitos hex del \texttt{cause\_code}. El estado completo de registros no se imprime en pantalla; para debug profundo se
+usa QEMU (\texttt{-d int,guest\_errors,cpu\_reset,mmu}). Esta diferencia está documentada en la
+sección~\ref{sec:limitaciones}.

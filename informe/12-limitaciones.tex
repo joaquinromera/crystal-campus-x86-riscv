@@ -1,0 +1,20 @@
+\begin{itemize}
+  \item \textbf{Input por polling, no por IRQ.} El UART 16550 puede generar interrupts vía PLIC, pero se optó por
+  polling en cada tick para minimizar la cantidad de mecanismos nuevos a documentar. A efectos de UX no hay diferencia
+  perceptible con la frecuencia del tick (${\sim}$20~Hz).
+  \item \textbf{Display ANSI, no VGA.} No hay acceso a un framebuffer; el ``tablero'' es una emulación por UART. Esto
+  implica cambios de render al redimensionar la terminal, y que el archivo de video no es un ``segmento de pantalla''
+  \emph{stricto sensu}.
+  \item \textbf{Modo debug simplificado.} Como se comentó en el ejercicio~7, la pantalla de debug completa del TP3
+  (registros, flags, stack) no se portó.
+  \item \textbf{Sin OpenSBI.} Al correr con \texttt{-bios none}, el kernel implementa su propia firmware mínima
+  (\texttt{machine.S}). Con \texttt{-bios default} (OpenSBI) el mismo kernel podría reemplazar \texttt{machine.S} por
+  llamadas SBI (\texttt{sbi\_set\_timer}, \texttt{sbi\_console\_putchar}, etc.) sin cambios a la lógica en S-mode.
+  \item \textbf{Single-hart.} QEMU \texttt{virt} soporta SMP, pero este port corre sobre un solo HART. Extenderlo a SMP
+  requeriría IPI (via \texttt{msip}), serialización del scheduler, y probablemente per-hart scratch state.
+  \item \textbf{Mapa de memoria distinto al del enunciado.} La figura del enunciado asume RAM desde \texttt{0x0000}. En
+  QEMU \texttt{virt} la RAM arranca en \texttt{0x8000\_0000}, así que las direcciones físicas concretas (kernel,
+  page-tables, tablero) son otras; lo que se preserva es la \emph{estructura} del layout.
+  \item \textbf{3 niveles de page-table vs 2.} Sv39 tiene L2/L1/L0; el TP3 x86 (paginación 32 bits sin PAE) tenía PD/PT.
+  Esto se aprovecha para mapear RAM con una sola gigapage, algo imposible en IA-32 de 32 bits sin PAE.
+\end{itemize}

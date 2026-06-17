@@ -1,0 +1,33 @@
+\section{Mapeo general x86 $\to$ RISC-V}
+\label{sec:mapeo}
+
+La siguiente tabla resume las equivalencias que se irán desarrollando en las secciones siguientes. Varios elementos del
+TP3 no tienen contraparte directa y su función la cumple otro mecanismo; se indica con ``---''.
+
+\begin{center}
+\small
+\begin{tabular}{p{6.2cm} | p{8.6cm}}
+\textbf{TP3 x86} & \textbf{RISC-V (este port)} \\
+\hline
+GDT + segmentación (code/data, nivel 0/3) & --- (no hay segmentos). Permisos por PTE Sv39 (\texttt{U/R/W/X}). \\
+Modo real $\to$ modo protegido + A20 & M-mode $\to$ S-mode vía \texttt{mret}; PMP abierta. \\
+CR0.PG + CR3 & CSR \texttt{satp} con modo SV39 + ASID + PPN. \\
+IDT + 255 ISR stubs & CSR \texttt{stvec} (único) + despacho en C por \texttt{scause}. \\
+Stack separada en cambio de nivel (SS0:ESP0 en TSS) & Stack dedicada de trap (\texttt{trap\_stack\_top}) y salto de
+\texttt{gp} al del kernel. \\
+\texttt{pushad}, selectores + \texttt{iret} & Guardado manual en \texttt{TrapFrame} (GPRs +
+\texttt{sepc}/\texttt{sstatus}/\texttt{scause}/\texttt{stval}) y \texttt{sret}. \\
+PIT 8254 + IRQ0 + PIC \texttt{pic\_finish1} & CLINT \texttt{mtimecmp}/\texttt{mtime} en M-mode $\to$ SSIP; \texttt{csrc
+sip, SSIP}. \\
+Teclado PS/2 IRQ1 + scancodes & UART 16550 por polling; teclas ASCII. \\
+VGA texto en \texttt{0xB8000} & UART + secuencias ANSI (80$\times$50 emulado). \\
+TSS + cambio de tarea por hardware (\texttt{jmp <sel>:<off>}) & \texttt{TrapFrame} por tarea + \texttt{sret} (cambio por
+software). \\
+\texttt{int 0x2F} (syscall) & \texttt{ecall}: \texttt{a7}=id, \texttt{a0}=arg/retorno. \\
+\texttt{invlpg} / recargar CR3 & \texttt{sfence.vma} (por VA o global, opcionalmente por ASID). \\
+\texttt{bochsrc} / Bochs & QEMU \texttt{virt} con \texttt{-bios none}. \\
+\end{tabular}
+\end{center}
+
+Las referencias a instrucciones y CSRs siguen la convención de~\cite{riscv-unpriv} (ISA no privilegiada)
+y~\cite{riscv-priv} (ISA privilegiada, CSRs, Sv39).

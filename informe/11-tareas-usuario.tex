@@ -1,0 +1,47 @@
+El TP x86 tenía \texttt{taskA.c}/\texttt{taskB.c} + \texttt{idle.asm}, compilados como blobs que el kernel copiaba desde
+\texttt{0x10000} al tablero. Este port sigue el mismo espíritu, pero usa un \emph{build separado} para los binarios de
+usuario:
+
+\begin{itemize}
+  \item Fuentes: \texttt{riscv/user/miner.c}, \texttt{riscv/user/idle.c}, \texttt{riscv/user/entry.S}.
+  \item Linker script propio (\texttt{riscv/user/linker.ld}) con \texttt{.}~$=$~\texttt{0x08000000}.
+  \item Producen \texttt{build/user\_miner.bin} / \texttt{build/user\_idle.bin} con \texttt{objcopy -O binary}.
+  \item Se embeben en el kernel como símbolos \texttt{\_binary\_build\_user\_miner\_bin\_start} / \texttt{\_end} vía
+  \texttt{ld -r -b binary}~\cite{gnu-ld}. El kernel los copia a la celda correspondiente en \texttt{write\_cell\_image}
+  durante \texttt{mmu\_task\_init}.
+\end{itemize}
+
+El \texttt{entry.S} de usuario es trivial:
+
+\begin{codesnippet}
+\begin{verbatim}
+ _start:
+     .option push
+     .option norelax
+     la gp, __global_pointer$
+     .option pop
+     call user_main
+ 1:  j 1b
+\end{verbatim}
+\end{codesnippet}
+
+El ABI para invocar servicios del sistema está en \texttt{riscv/syscall.h}, usando la convención \texttt{a7}=id +
+\texttt{a0}=arg/retorno (estándar \emph{syscall} de Linux/RISC-V~\cite{riscv-psabi}):
+
+\begin{codesnippet}
+\begin{verbatim}
+ static inline void syscall_move(e_direction_t d) {
+     register uint64_t a7 asm("a7") = 177788;
+     register uint64_t a0 asm("a0") = (uint64_t)d;
+     asm volatile("ecall" : "+r"(a0) : "r"(a7) : "memory");
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El minero (\texttt{miner.c}) contiene dos modos:
+
+\begin{itemize}
+  \item \emph{Cosecha básica}: avanzar, tomar cristales, volver a base (análogo a la tarea ejemplo del TP).
+  \item \emph{Prueba de excepción}: cuando el minero tiene \texttt{id}$=$5, provoca una escritura en la VA \texttt{0x0}
+  para generar un page fault (equivalente a la ``división por cero'' del TP3).
+\end{itemize}

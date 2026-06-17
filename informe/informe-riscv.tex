@@ -1,0 +1,196 @@
+% ******************************************************** %
+%  TP FINAL -- MICROKERNEL RISC-V                          %
+%  Portación del TP3 "Crystal Campus" de x86 a RISC-V rv64 %
+% ******************************************************** %
+
+\documentclass[a4paper]{article}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{charter}   % tipografía
+\usepackage{graphicx}
+\usepackage{wrapfig}
+\usepackage{fancyvrb}
+\usepackage{paralist}
+\usepackage{amsmath, amsthm, amssymb}
+\usepackage{multicol}
+\usepackage{underscore}
+\usepackage{caratula}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{longtable}
+
+% ********************************************************* %
+% ~~~~~~~~              Code snippets             ~~~~~~~~~ %
+% ********************************************************* %
+\usepackage{color}
+\usepackage{fancybox}
+\definecolor{litegrey}{gray}{0.94}
+\newenvironment{codesnippet}{%
+    \begin{Sbox}\begin{minipage}{\textwidth}\sffamily\small}%
+    {\end{minipage}\end{Sbox}%
+        \begin{center}%
+        \vspace{-0.4cm}\colorbox{litegrey}{\TheSbox}\end{center}\vspace{0.3cm}}
+
+% ********************************************************* %
+% ~~~~~~~~         Formato de las páginas         ~~~~~~~~~ %
+% ********************************************************* %
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LO]{\small Organización del Computador II}
+\fancyhead[RO]{\small Microkernel RISC-V}
+\fancyfoot[LO]{\small{Joaquín Romera}}
+\fancyfoot[RO]{\thepage}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+\setlength{\hoffset}{-0.8in}
+\setlength{\textwidth}{16cm}
+\setlength{\headsep}{0.5cm}
+\setlength{\textheight}{25cm}
+\setlength{\voffset}{-0.7in}
+\setlength{\headwidth}{\textwidth}
+\setlength{\headheight}{13.1pt}
+\renewcommand{\baselinestretch}{1.1}
+
+% Mayor "estiramiento" de párrafos para \texttt{} largos sin hifenar.
+\emergencystretch=3em
+\tolerance=800
+\hbadness=10000
+
+% ******************************************************** %
+
+\begin{document}
+
+% Desactivamos shorthands de babel-spanish (<<, >>, ~) para evitar conversión
+% a guillemets dentro de snippets y \texttt{}.
+\shorthandoff{<>~}
+
+\thispagestyle{empty}
+\materia{Organización del Computador II}
+\submateria{TP Final}
+\titulo{Microkernel RISC-V}
+\subtitulo{Adaptación del TP3 \emph{Crystal Campus} de x86 (IA-32) a RISC-V (rv64)}
+\fecha{\today}
+\integrante{Joaquín Romera}{183/16}{joakromera@gmail.com}
+
+\maketitle
+\newpage
+
+\thispagestyle{empty}
+\vfill
+\vspace{3cm}
+
+\begin{abstract}
+Este informe documenta la adaptación del TP3 \emph{Crystal Campus} de Organización del Computador II, originalmente
+implementado sobre x86 (IA-32) en modo protegido y corrido bajo Bochs, a la arquitectura RISC-V de 64 bits
+(\texttt{rv64imac}) sobre la máquina \texttt{virt} de QEMU. El objetivo es preservar la mecánica de juego y el esqueleto
+de ejercicios del TP original, reemplazando los mecanismos propios de IA-32 (GDT, IDT, TSS, PIC 8259A, PIT 8254, teclado
+PS/2, memoria de video VGA en \texttt{0xB8000}, paginación de dos niveles con CR0/CR3) por sus equivalentes nativos de
+RISC-V (Sv39, \texttt{stvec}, \texttt{satp}, CLINT/ACLINT, UART 16550, modos M/S/U). El kernel corre sin firmware previo
+(QEMU \texttt{-bios none}): arranca en \textbf{M-mode}, se configura él mismo (PMP, delegación de traps, timer) y
+desciende a \textbf{S-mode}, donde vive el grueso del kernel; las tareas mineras corren en \textbf{U-mode}. La arquitectura
+distintiva del TP (tener el código de cada minero físicamente alojado en la celda del tablero donde se encuentra)
+se preserva sobre Sv39, manteniendo la noción de ``tablero como memoria''.
+\end{abstract}
+
+\newpage
+
+\tableofcontents
+
+\input{00-introduccion}
+\newpage
+\input{01-entorno}
+\newpage
+\input{02-mapeo}
+\newpage
+\section{Ejercicio 1 --- Arranque y paso a modo supervisor}
+\input{03-ejercicio1}
+\newpage
+\section{Ejercicio 2 --- Manejo de excepciones: IDT $\to$ \texttt{stvec}}
+\input{04-ejercicio2}
+\newpage
+\section{Ejercicio 3 --- Reloj, teclado e interrupción 47}
+\input{05-ejercicio3}
+\newpage
+\section{Ejercicio 4 --- Paginación del kernel}
+\input{06-ejercicio4}
+\newpage
+\section{Ejercicio 5 --- MMU de tareas}
+\input{07-ejercicio5}
+\newpage
+\section{Ejercicio 6 --- Contexto de tarea: TSS $\to$ TrapFrame}
+\input{08-ejercicio6}
+\newpage
+\section{Ejercicio 7 --- Scheduler y servicios}
+\input{09-ejercicio7}
+\newpage
+\section{Despacho de tareas y lógica del juego}
+\input{10-despacho}
+\newpage
+\section{Tareas de usuario}
+\label{sec:user}
+\input{11-tareas-usuario}
+\newpage
+\section{Limitaciones y diferencias respecto al TP3 original}
+\label{sec:limitaciones}
+\input{12-limitaciones}
+\newpage
+\section{Build y ejecución}
+\input{13-build}
+\newpage
+
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{riscv-unpriv}
+RISC-V International. \emph{The RISC-V Instruction Set Manual, Volume I: Unprivileged Architecture}. \\
+\url{https://riscv.github.io/riscv-isa-manual/snapshot/unprivileged/}
+
+\bibitem{riscv-priv}
+RISC-V International. \emph{The RISC-V Instruction Set Manual, Volume II: Privileged Architecture}. Document version
+20211203, ratificado en diciembre de 2021. \\
+\url{https://github.com/riscv/riscv-isa-manual/releases/download/Priv-v1.12/riscv-privileged-20211203.pdf} \\
+Versión snapshot en HTML: \url{https://riscv.github.io/riscv-isa-manual/snapshot/privileged}
+
+\bibitem{riscv-psabi}
+RISC-V Non-ISA Working Group. \emph{RISC-V ELF psABI Specification}. \\
+\url{https://riscv-non-isa.github.io/riscv-elf-psabi-doc/}
+
+\bibitem{riscv-sbi}
+RISC-V International. \emph{RISC-V Supervisor Binary Interface Specification}. \\
+\url{https://github.com/riscv-non-isa/riscv-sbi-doc}
+
+\bibitem{riscv-aclint}
+RISC-V International. \emph{RISC-V Advanced Core Local Interruptor (ACLINT) Specification}. \\
+\url{https://github.com/riscv/riscv-aclint}
+
+\bibitem{riscv-plic}
+RISC-V International. \emph{RISC-V Platform-Level Interrupt Controller (PLIC) Specification}. \\
+\url{https://github.com/riscv/riscv-plic-spec}
+
+\bibitem{qemu-virt}
+QEMU Project. \emph{QEMU System Emulation, 'virt' Machine (RISC-V)}. \\
+\url{https://www.qemu.org/docs/master/system/riscv/virt.html}
+
+\bibitem{xv6-riscv}
+Cox, R., Kaashoek, M.~F., Morris, R. \emph{xv6: a simple, Unix-like teaching operating system (RISC-V port)}. MIT. \\
+\url{https://github.com/mit-pdos/xv6-riscv} \\
+\url{https://github.com/mit-pdos/xv6-riscv-book}
+
+\bibitem{gnu-ld}
+Free Software Foundation. \emph{Using ld (GNU linker) --- Binary input format}. \\
+\url{https://sourceware.org/binutils/docs/ld/Options.html}
+
+\bibitem{ns16550}
+National Semiconductor. \emph{PC16550D Universal Asynchronous Receiver/Transmitter with FIFOs}. Datasheet.
+
+\bibitem{osdev-riscv}
+OSDev Wiki. \emph{RISC-V} (página principal del wiki), \emph{RISC-V Bare Bones}, y \emph{RISC-V Meaty Skeleton with QEMU
+virt board}. \\
+\url{https://wiki.osdev.org/RISC-V} \\
+\url{https://wiki.osdev.org/RISC-V_Bare_Bones} \\
+\url{https://wiki.osdev.org/RISC-V_Meaty_Skeleton_with_QEMU_virt_board}
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,97 @@
+\subsection{Qué hacía el TP x86}
+
+El TP3 usaba \textbf{task switching por hardware}: un descriptor de TSS en la GDT por tarea
+(\texttt{tss\_initGdtEntry}), una TSS por tarea (\texttt{fill\_tss\_idle}, \texttt{fill\_tss}) con \texttt{eip},
+\texttt{cr3}, \texttt{esp}, \texttt{eflags}, selectores de segmento, etc. El cambio de tarea se hacía con un \texttt{jmp
+<sel>:<off>} al selector de la TSS, dejando que el procesador guardara/cargara todo el contexto automáticamente.
+
+\subsection{Equivalente en RISC-V}
+
+RISC-V no tiene task switching por hardware, todo es por software. Se simplifica bastante: no hay GDT, ni TSS, ni
+descriptores; queda una estructura por tarea y nada más:
+
+\begin{codesnippet}
+\begin{verbatim}
+ struct Task {
+   TrapFrame tf;
+   uint32_t initialized;
+ };
+ static Task g_tasks[20];
+ static TrapFrame g_idle_tf;
+\end{verbatim}
+\end{codesnippet}
+
+Cada \texttt{TrapFrame} cumple el rol que en el TP x86 cumplía la TSS: contiene el \emph{snapshot} completo del estado
+de esa tarea. El campo \texttt{initialized} replica la noción de ``descriptor presente''.
+
+\subsection{Inicialización de \texttt{TrapFrame} (equivalente de \texttt{fill\_tss})}
+
+Toda la ``configuración inicial de la TSS'' del TP x86 (eip, esp, cs/ds/ss, eflags) se colapsa en tres campos del
+\texttt{TrapFrame}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static void init_user_trapframe(TrapFrame& tf, uint64_t entry_pc) {
+     tf = {};
+     tf.sepc = entry_pc;              // PC inicial
+     tf.sp   = TASK_STACK;            // stack de usuario
+     // SPIE=1 (SIE <- SPIE tras sret), SPP=0 (retorno a U-mode).
+     tf.sstatus = (1ull << 5);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+\begin{itemize}
+  \item \texttt{sepc}$=$\texttt{TASK\_CODE} (\texttt{0x08000000}) $\Leftrightarrow$ \texttt{tss.eip}$=$dirección inicial
+  del código.
+  \item \texttt{sp}$=$\texttt{TASK\_STACK}$=$\texttt{TASK\_CODE}+2$\cdot$4~KiB $\Leftrightarrow$ \texttt{tss.esp}.
+  \item \texttt{sstatus.SPIE}$=$1 asegura que \texttt{SIE}$=$1 luego del \texttt{sret}, es decir, la tarea corre con
+  interrupciones habilitadas (equivalente a \texttt{eflags.IF}$=$1 del TP x86, donde se usaba \texttt{0x202}).
+  \item \texttt{sstatus.SPP}$=$0 indica que el \texttt{sret} devuelve el control a U-mode (equivalente a ``DPL=3''). No
+  hay ``CS'' ni ``DS''; el modo es el único eje de privilegio.
+\end{itemize}
+
+Nótese que en RISC-V no existen ``registros de segmento'': eso elimina por completo los campos
+\texttt{cs/ds/ss/fs/gs/es} de la TSS. Tampoco hace falta una ``stack de nivel 0'' por tarea (\texttt{ss0:esp0}): al
+entrar al kernel vía trap, se cambia a el stack de trap única (\texttt{trap\_stack\_top}), que alcanza porque SIE se
+limpia al entrar al trap (no hay traps anidados al mismo nivel de privilegio).
+
+\subsection{``Salto a la tarea Idle''}
+
+El TP x86 arrancaba con \texttt{jmp 0xB8:0} después de cargar \texttt{tr} con el selector de la tarea inicial. En este
+port, \texttt{kernel\_main} hace:
+
+\begin{codesnippet}
+\begin{verbatim}
+ init_idle_once();
+
+ asm volatile("csrw stvec, %0" : : "r"((uint64_t)trap_entry));
+ const uint64_t sie_mask = (1ull << 1) | (1ull << 5); // SSIE + STIE
+ asm volatile("csrs sie, %0" : : "r"(sie_mask));
+
+ TrapFrame* first = schedule_next();
+ enter_user(first);
+\end{verbatim}
+\end{codesnippet}
+
+\texttt{enter\_user} (en \texttt{trap.S}) restaura todos los GPRs del \texttt{TrapFrame} y ejecuta \texttt{sret}. Con
+\texttt{sstatus.SPP}$=$0 y \texttt{sepc}$=$\texttt{TASK\_CODE}, esto transiciona a U-mode saltando al primer byte del
+binario de idle.
+
+\subsection{La tarea Idle}
+
+En el TP x86, idle era un binario del kernel en \texttt{0x00014000} que compartía \texttt{cr3} con el kernel. En este
+port idle es un binario de usuario \emph{separado} (\texttt{riscv/user/idle.c}, ver sección~\ref{sec:user}), con su
+propia address space (\texttt{asid}$=$0) y su propio buffer de 8~KiB como ``celda'' (no está en el tablero). Su código
+completo es:
+
+\begin{codesnippet}
+\begin{verbatim}
+ void user_main() {
+     for (;;) __asm__ volatile("nop");
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El porqué de hacerla U-mode y no S-mode: mantiene el mismo ABI/path de entrada/salida que los mineros, simplifica el
+\texttt{TrapFrame} y evita tener que distinguir ``contexto supervisor'' vs ``contexto usuario'' en el scheduler.

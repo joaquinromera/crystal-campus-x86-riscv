@@ -1,0 +1,162 @@
+\subsection{Qué hacía el TP x86}
+
+Este ejercicio era el más denso del TP3. Incluía:
+
+\begin{itemize}
+  \item \texttt{mmu\_init}: contadores \texttt{next\_free\_kernel\_page} (desde \texttt{0x100000}) y
+  \texttt{next\_free\_task\_page} (desde \texttt{0x400000}).
+  \item \texttt{mmu\_initTaskDir}: construir el PD/PT de la tarea, identity-mapear kernel + área libre kernel, copiar el
+  código original de la tarea (desde \texttt{MMU\_BASE\_ADDR\_TAREAS}) a su celda física en el tablero, mapear
+  \texttt{TASK\_CODE} (\texttt{0x08000000}) a esas páginas con permisos U, y mapear \texttt{TASK\_COMPARTIDA} a
+  \texttt{g\_shared[jugador]}.
+  \item \texttt{mmu\_mapPage} / \texttt{mmu\_unmapPage}: helpers para mapear/desmapear una página virtual, invalidando
+  el TLB con \texttt{tlbflush}.
+\end{itemize}
+
+\subsection{Equivalente en RISC-V}
+
+La portación conserva el esquema ``el código del minero vive físicamente en su celda del tablero''. Las funciones
+equivalentes viven en \texttt{riscv/mmu.cpp}:
+
+\begin{itemize}
+  \item \texttt{mmu\_task\_init(slot, player, x, y)}: equivalente de \texttt{mmu\_initTaskDir}.
+  \item \texttt{mmu\_task\_move(slot, old\_x, old\_y, new\_x, new\_y)}: equivalente conjunto de ``copiar 8~KiB +
+  remapear \texttt{TASK\_CODE}''.
+  \item \texttt{mmu\_switch\_to\_task(slot)} / \texttt{mmu\_switch\_to\_idle()}: análogo a ``cargar CR3'' (escribir
+  \texttt{satp}).
+\end{itemize}
+
+No se exponen \texttt{mmu\_mapPage}/\texttt{mmu\_unmapPage} genéricas, porque en este port el universo de mapeos es más
+restringido y conocido (kernel gigapage, UART megapage, dos páginas de código y dos páginas compartidas por tarea). El
+rol de esas funciones lo cumplen \texttt{map\_user\_code\_pages} y \texttt{map\_user\_shared}, que actualizan
+directamente \texttt{t.l0\_user[]}.
+
+\subsection{Allocator del kernel}
+
+El análogo del ``contador de páginas libres'' del TP x86 es un \emph{bump allocator} a partir del final del
+\texttt{.bss}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static uint64_t g_alloc_page = 0;
+
+ static void* alloc_page_table() {
+     if (g_alloc_page == 0) {
+         g_alloc_page = align_up_u64(
+             reinterpret_cast<uint64_t>(&__bss_end), PAGE_SIZE);
+     }
+     void* page = reinterpret_cast<void*>(g_alloc_page);
+     g_alloc_page += PAGE_SIZE;
+     memset(page, 0, PAGE_SIZE);
+     return page;
+ }
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{``Tablero como memoria''}
+
+El ``área mapa'' del TP3 (\texttt{0x400000}..\texttt{0x1C5FFFF}, 78$\times$40 celdas de 8~KiB) se reemplaza por un
+\textbf{arreglo estático alineado a página}:
+
+\begin{codesnippet}
+\begin{verbatim}
+ alignas(PAGE_SIZE) static uint8_t
+     g_board[TABLERO_N_COLS * TABLERO_N_FILS * kCellBytes];
+
+ static inline uint64_t board_cell_pa(uint32_t x, uint32_t y) {
+     const uint64_t ix = y * TABLERO_N_COLS + x;
+     return reinterpret_cast<uint64_t>(&g_board[ix * kCellBytes]);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Esto evita tener que fijar direcciones físicas ``mágicas'' y deja que el linker resuelva el layout. Igualmente se cumple
+la propiedad del TP3: cada celda del tablero es un bloque contiguo de 8~KiB y \texttt{board\_cell\_pa(x,y)} es su
+dirección física.
+
+Las áreas compartidas entre mineros del mismo jugador se resuelven también con arreglos estáticos:
+
+\begin{codesnippet}
+\begin{verbatim}
+ alignas(PAGE_SIZE) static uint8_t g_shared[2][2 * PAGE_SIZE];
+\end{verbatim}
+\end{codesnippet}
+
+\subsection{Construcción de la page-table de tarea}
+
+\texttt{mmu\_task\_init} construye la page-table completa de una tarea:
+
+\begin{codesnippet}
+\begin{verbatim}
+ static inline void task_build_pagetable(TaskMmu& t,
+         uint16_t asid, uint32_t player_id, uint64_t cell_pa) {
+     t.root = reinterpret_cast<uint64_t*>(alloc_page_table());
+     map_kernel_gigapage(t.root);
+     ensure_l1_0(t);
+     map_uart(t);
+     map_user_code_pages(t, cell_pa);       // TASK_CODE (2 pags)
+     map_user_shared(t, player_id);         // TASK_COMPARTIDA (2 pags)
+     t.asid = asid;
+     t.satp = make_satp(
+         reinterpret_cast<uint64_t>(t.root), asid);
+     t.initialized = 1;
+ }
+\end{verbatim}
+\end{codesnippet}
+
+El mapeo de \texttt{TASK\_CODE} es el punto crítico de la mecánica del juego: a partir de la VA \texttt{0x08000000} se
+mapean dos páginas físicas contiguas a partir de \texttt{cell\_pa}, con flags \texttt{V|R|W|X|U|A|D}. Es decir, \emph{el
+minero puede leer, escribir y ejecutar en el mismo bloque de memoria} --- exactamente la condición que hace posible que
+el juego copie el código de la tarea a otra celda y la tarea siga ejecutando desde \texttt{0x08000000} con código
+distinto.
+
+\subsection{\texttt{mmu\_task\_move}: movimiento del minero}
+
+Es el análogo a ``copiar 8~KiB + \texttt{mmu\_mapPage(TASK\_CODE, ...)} + \texttt{tlbflush}'' del TP x86:
+
+\begin{codesnippet}
+\begin{verbatim}
+ void mmu_task_move(uint32_t slot,
+                    uint32_t old_x, uint32_t old_y,
+                    uint32_t new_x, uint32_t new_y) {
+     TaskMmu& t = g_tasks[slot];
+     if (!t.initialized) return;
+
+     const uint64_t src_pa = board_cell_pa(old_x, old_y);
+     const uint64_t dst_pa = board_cell_pa(new_x, new_y);
+
+     memcpy((void*)dst_pa, (const void*)src_pa, kCellBytes);
+     fence_i();                              // ifetch coherence
+
+     map_user_code_pages(t, dst_pa);
+     sfence_vma_addr(kUserBase);
+     sfence_vma_addr(kUserBase + PAGE_SIZE);
+ }
+\end{verbatim}
+\end{codesnippet}
+
+Detalles técnicos:
+
+\begin{itemize}
+  \item \textbf{\texttt{fence.i}.} Después de escribir instrucciones en memoria, RISC-V no garantiza que el pipeline de
+  instrucciones vea los bytes nuevos hasta una \texttt{fence.i} explícita~\cite{riscv-unpriv}. En x86 la coherencia
+  I\$/D\$ es automática; en RISC-V no, y sin esta instrucción el minero podría ejecutar el código viejo después del
+  movimiento (me pasó debuggeando: la tarea arrancaba, se ``movía'', y seguía ejecutando como si estuviera en la celda
+  original).
+  \item \textbf{\texttt{sfence.vma rs1=va, rs2=x0}.} Invalida sólo la entrada del TLB para esa VA, el equivalente del
+  \texttt{invlpg} de x86. Es más barato que un flush global y alcanza porque el único cambio fue \texttt{TASK\_CODE}.
+\end{itemize}
+
+\subsection{ASIDs}
+
+Sv39 permite incluir un \texttt{ASID} en \texttt{satp} para que el TLB no haga flush global al cambiar de address space.
+Este port asigna:
+
+\begin{itemize}
+  \item \texttt{asid}$=$0 para idle.
+  \item \texttt{asid}$=$slot+1 para mineros (1..20).
+\end{itemize}
+
+El \texttt{sfence.vma x0, x0} sólo se usa al inicializar una tarea; en runtime los cambios de address space se hacen con
+\texttt{mmu\_switch()} que escribe \texttt{satp} (con su ASID) y hace un \texttt{sfence.vma} global (simplicidad $>$
+eficiencia).

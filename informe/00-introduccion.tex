@@ -1,0 +1,22 @@
+\section{Introducción}
+
+El TP3 de la materia se implementaba originalmente sobre x86 (IA-32) en modo protegido, con boot desde floppy, BIOS y
+ejecución bajo el simulador Bochs. Este trabajo final documenta la adaptación de ese mismo proyecto a la arquitectura
+RISC-V de 64 bits (\texttt{rv64imac}) sobre la máquina \texttt{virt} de QEMU.
+
+La idea de este trabajo es preservar la mecánica de juego y el esqueleto de ejercicios del TP original,
+reemplazando los mecanismos específicos de IA-32 (GDT, IDT, TSS, PIC 8259A, PIT 8254, teclado PS/2, memoria de video VGA
+en \texttt{0xB8000}, paginación de dos niveles con CR0/CR3) por sus equivalentes nativos de RISC-V. En particular, la
+consigna principal del TP --- tener el código de cada minero \emph{físicamente alojado} en la celda del tablero donde
+se encuentra y, al moverse, copiar su imagen de 8~KiB a la nueva celda y remapear \texttt{TASK\_CODE} --- se mantiene
+uno a uno, pero ahora implementada sobre Sv39.
+
+El kernel corre sin firmware previo (QEMU \texttt{-bios none}). Esto implica que el propio kernel arranca en
+\textbf{modo máquina (M-mode)}, se configura a sí mismo (PMP, delegación de traps, tick del timer) y desciende luego a
+\textbf{modo supervisor (S-mode)}, donde vive el grueso del kernel. Las tareas mineras corren en \textbf{modo usuario
+(U-mode)}. Los detalles de los CSRs y modos de privilegio siguen~\cite{riscv-priv}.
+
+Este informe está organizado siguiendo la misma numeración de ejercicios del enunciado y del informe x86 original, para
+que la correspondencia entre ambos sea uno a uno. En cada sección se indica, primero, qué se hacía en x86 y, a
+continuación, qué mecanismo nativo de RISC-V lo reemplaza y dónde está implementado dentro de la carpeta \texttt{riscv/} del
+repositorio.

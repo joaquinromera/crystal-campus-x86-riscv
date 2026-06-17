@@ -1,0 +1,40 @@
+\section{Entorno y herramientas}
+
+\subsection{De Bochs a QEMU \texttt{virt}}
+
+El TP original corría sobre Bochs, emulando un IBM-PC compatible con boot desde floppy y BIOS. En RISC-V esto no
+aplica; la opción estándar para bare-metal es la máquina \texttt{virt} de QEMU~\cite{qemu-virt}, que expone:
+
+\begin{itemize}
+  \item Un conjunto de HARTs rv64 (este port usa uno solo).
+  \item RAM a partir de \texttt{0x80000000}.
+  \item Un UART 16550~\cite{ns16550} mapeado en \texttt{0x10000000}.
+  \item CLINT (Core Local Interruptor) con \texttt{mtime}/\texttt{mtimecmp} en el rango
+  \texttt{0x02000000}~\cite{riscv-aclint}.
+  \item PLIC en \texttt{0x0C000000} (no se usa en este port; el tick sale del CLINT).
+\end{itemize}
+
+Al arrancar con \texttt{-bios none}, QEMU carga el ELF del kernel y salta a \texttt{0x80000000} en M-mode, sin
+firmware intermedio. Esto deja al kernel la responsabilidad de todo el boot, incluyendo la programación del timer.
+El wiki OSDev~\cite{osdev-riscv} documenta en detalle esta forma de arranque y el layout de MMIO de la máquina
+\texttt{virt}.
+
+\subsection{Toolchain y flags}
+
+Se utiliza la toolchain \texttt{riscv64-unknown-elf-*} (GCC bare-metal) y \texttt{qemu-system-riscv64}. Los flags
+relevantes del \texttt{Makefile} del port:
+
+\begin{codesnippet}
+\begin{verbatim}
+ ARCH_OPTS  = -march=rv64imac -mabi=lp64
+ COMMONFLAGS = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
+               -fno-stack-protector -fno-exceptions -fno-rtti \
+               -fno-threadsafe-statics -fno-unwind-tables \
+               -fno-asynchronous-unwind-tables -mcmodel=medany $(ARCH_OPTS)
+\end{verbatim}
+\end{codesnippet}
+
+El \emph{code model} \texttt{medany} es necesario porque el kernel se ubica en \texttt{0x80000000}, muy fuera del
+rango $\pm 2$~GiB del PC que usa \texttt{medlow} para instrucciones PC-relativas extendidas~\cite{riscv-psabi}. El
+script del linker (\texttt{riscv/linker.ld}) fija \texttt{.}~$=$~\texttt{0x80000000} y coloca \texttt{\_start} primero,
+de manera que el punto de entrada coincide con el reset vector de QEMU.
